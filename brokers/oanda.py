@@ -77,8 +77,28 @@ def get_open_positions():
     return r.response.get("positions", [])
 
 def close_position(instrument):
-    """Close the entire position for an instrument."""
-    data = {"longUnits": "ALL", "shortUnits": "ALL"}
+    """Close the position for an instrument — only the side that's actually open."""
+    # First, find out what's actually open
+    r = positions.OpenPositions(accountID=config.OANDA_ACCOUNT_ID)
+    client.request(r)
+    open_pos = r.response.get("positions", [])
+
+    target = None
+    for p in open_pos:
+        if p["instrument"] == instrument:
+            target = p
+            break
+
+    if target is None:
+        return {"closed": False, "reason": f"No open position for {instrument}"}
+
+    # Build close request for only the side(s) with units
+    data = {}
+    if float(target["long"]["units"]) > 0:
+        data["longUnits"] = "ALL"
+    if float(target["short"]["units"]) < 0:
+        data["shortUnits"] = "ALL"
+
     r = positions.PositionClose(
         accountID=config.OANDA_ACCOUNT_ID,
         instrument=instrument,
