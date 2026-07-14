@@ -204,6 +204,8 @@ def run_agent(user_message="What's the current price of EUR_USD and GBP_USD?"):
     for block in response.content:
         if block.type == "text":
             print(f"\n[agent] {block.text}")
+            from notifications.telegram import send_message
+            send_message(f"🤖 *JARVIS:*\n{block.text}")
 
     log_event("agent_run", f"Completed run. Query: {user_message}")
 
