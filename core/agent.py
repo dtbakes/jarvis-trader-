@@ -8,6 +8,7 @@ import config
 from core.memory import log_event, get_recent_events, log_trade, get_recent_trades, get_all_facts, set_fact
 from brokers.oanda import get_price, get_candles, place_market_order, close_position, get_open_positions, get_account_summary
 import core.risk as risk
+from core import killswitch
 
 client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 MODEL = "claude-haiku-4-5-20251001"
@@ -48,7 +49,7 @@ tools = [
                 "stop_loss_price": {"type": "number", "description": "Price at which to auto-close to limit loss"},
                 "reasoning": {"type": "string", "description": "Why you're making this trade"}
             },
-            "required": ["instrument", "units", "reasoning"]
+            "required": ["instrument", "units", "stop_loss_price", "reasoning"]
         }
     },
     {
@@ -70,6 +71,8 @@ tools = [
     }
 ]
 
+TRADING_TOOLS = {"place_trade", "close_trade"}
+
 # --- Tool implementations ---
 def get_market_price(instrument):
     data = get_price(instrument)
@@ -82,9 +85,20 @@ def remember_fact(key, value):
     return {"stored": True, "key": key, "value": value}
 
 def place_trade(instrument, units, reasoning, stop_loss_price=None):
+    # Fresh NAV check right before the order, so the kill switch sees the
+    # latest P&L. If the account can't be read, evaluate() fails closed.
+    try:
+        nav = float(get_account_summary()["NAV"])
+    except Exception as e:
+        log_event("killswitch_nav_error", f"Could not read NAV: {e}")
+        nav = None
+    ks = killswitch.evaluate(nav)
+    if ks["tripped_now"]:
+        log_event("killswitch_tripped", ks["reason"])
+
     # RISK CHECK FIRST -- this is the gate. Nothing bypasses it.
     try:
-        risk.check_order(instrument, units)
+        risk.check_order(instrument, units, stop_loss_price)
     except risk.RiskViolation as e:
         log_event("trade_blocked", f"BLOCKED {instrument} {units}: {e}")
         return {"executed": False, "blocked": True, "reason": str(e)}
@@ -96,11 +110,14 @@ def place_trade(instrument, units, reasoning, stop_loss_price=None):
     # Passed all checks -- execute
     try:
         result = place_market_order(instrument, units, stop_loss_price)
+        killswitch.record_success()
         log_trade(f"{'BUY' if units > 0 else 'SELL'} {abs(units)}", instrument, reasoning, "executed")
         log_event("trade_executed", f"{'BUY' if units > 0 else 'SELL'} {abs(units)} {instrument}")
         return {"executed": True, "instrument": instrument, "units": units, "result": result}
     except Exception as e:
         log_event("trade_error", f"ERROR {instrument}: {e}")
+        if killswitch.record_error(str(e))["tripped_now"]:
+            log_event("killswitch_tripped", "Too many consecutive broker errors")
         return {"executed": False, "error": str(e)}
 
 def close_trade(instrument, reasoning):
@@ -160,8 +177,13 @@ def build_memory_context():
     return "\n".join(parts) if parts else "No memory yet -- this is the first run."
 
 # --- The agent loop ---
-def run_agent(user_message="What's the current price of EUR_USD and GBP_USD?"):
+def run_agent(user_message="What's the current price of EUR_USD and GBP_USD?", allow_trading=False):
+    """
+    allow_trading=False hides place_trade/close_trade from the model entirely,
+    so observe-only is enforced in code, not just asked for in the prompt.
+    """
     memory_context = build_memory_context()
+    run_tools = tools if allow_trading else [t for t in tools if t["name"] not in TRADING_TOOLS]
 
     system_prompt = (
         "You are JARVIS, an autonomous trading agent. "
@@ -177,7 +199,7 @@ def run_agent(user_message="What's the current price of EUR_USD and GBP_USD?"):
 
     response = client.messages.create(
         model=MODEL, max_tokens=1024,
-        system=system_prompt, tools=tools, messages=messages,
+        system=system_prompt, tools=run_tools, messages=messages,
     )
 
     while response.stop_reason == "tool_use":
@@ -187,7 +209,10 @@ def run_agent(user_message="What's the current price of EUR_USD and GBP_USD?"):
         for block in response.content:
             if block.type == "tool_use":
                 print(f"[tool call]   {block.name}({block.input})")
-                result = run_tool(block.name, block.input)
+                if block.name in TRADING_TOOLS and not allow_trading:
+                    result = {"error": "Trading tools are disabled in this run."}
+                else:
+                    result = run_tool(block.name, block.input)
                 print(f"[tool result] {result}")
                 tool_results.append({
                     "type": "tool_result",
@@ -198,7 +223,7 @@ def run_agent(user_message="What's the current price of EUR_USD and GBP_USD?"):
         messages.append({"role": "user", "content": tool_results})
         response = client.messages.create(
             model=MODEL, max_tokens=1024,
-            system=system_prompt, tools=tools, messages=messages,
+            system=system_prompt, tools=run_tools, messages=messages,
         )
 
     for block in response.content:
