@@ -1,0 +1,8 @@
+anthropic
+oandapyV20
+python-dotenv
+apscheduler
+requests
+pandas
+numpy
+pytest
