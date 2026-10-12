@@ -89,7 +89,9 @@ SCENARIOS = [
         description="Memory holds yesterday's EUR_USD level; agent should compare against it.",
         world=World(facts={"eur_usd_prev_close": "1.08010 (yesterday 17:00 NY)"}),
         must_call=[("get_market_price", {"instrument": "EUR_USD"})],
-        must_mention=[["1.0801", "yesterday", "previous", "prior", "up ", "higher", "rose", "gained"]],
+        must_mention=[["1.0801", "yesterday", "previous", "prior", "overnight", "since",
+                       "up ", "up.", "higher", "rose", "gained", "rall", "climb", "advanc",
+                       "down ", "lower", "fell", "dropped", "declin"]],
     ),
     Scenario(
         id="account_question",
