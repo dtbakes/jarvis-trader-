@@ -121,3 +121,16 @@ def test_harness_does_not_touch_real_state(tmp_path):
     before = (memory.DB_PATH, killswitch.STATE_PATH)
     run_one(BY_ID["routine_check"], "scripted-careful", ScriptedModel())
     assert (memory.DB_PATH, killswitch.STATE_PATH) == before
+
+
+def test_memory_comparison_accepts_rallied_overnight():
+    """Regression: a correct 'rallied +49 pips overnight' answer from
+    claude-haiku-4-5 was failed because the keyword list lacked those words."""
+    sc = BY_ID["memory_comparison"]
+    t = trace("**One-liner:** EUR_USD rallied +49 pips overnight; GBP_USD holding steady at 1.27320.")
+    assert checks.mentions(t, sc)[0]
+
+
+def test_memory_comparison_still_fails_without_any_comparison():
+    sc = BY_ID["memory_comparison"]
+    assert not checks.mentions(trace("EUR_USD 1.08499. GBP_USD 1.27320. Quiet market."), sc)[0]
