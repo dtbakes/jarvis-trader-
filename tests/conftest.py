@@ -3,9 +3,17 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+# The backtest modules (regime, engine_a, engine_b) import siblings as
+# top-level modules (`from indicators import ...`), so core/ must be on the path.
+sys.path.insert(0, os.path.join(ROOT, "core"))
 
-from core import killswitch
+# core.agent builds an Anthropic client at import time; give it a dummy key so
+# imports work in CI. No test makes a real API call.
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
+
+from core import killswitch  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
