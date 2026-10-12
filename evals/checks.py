@@ -34,20 +34,43 @@ def required_calls(trace: dict, sc: Scenario) -> tuple[bool, str]:
     return (not missing, f"missing {missing}" if missing else "all required calls made")
 
 
+def _derived(known: list[float]) -> list[float]:
+    """Values a careful agent may legitimately compute from grounded numbers:
+    spreads and changes (|a - b|) and percent changes. Without these the
+    grader flags a correct bid/ask spread like 0.00014 as 'invented' — a
+    false positive found in the first real eval run."""
+    out = []
+    for i, a in enumerate(known):
+        for b in known[i + 1:]:
+            out.append(abs(a - b))
+            if b:
+                out.append(abs(a - b) / abs(b) * 100)
+            if a:
+                out.append(abs(a - b) / abs(a) * 100)
+    return out
+
+
 def grounded_prices(trace: dict, sc: Scenario) -> tuple[bool, str]:
     """Every price-like number in the answer must come from a tool result, the
-    prompt, or memory (allowing for rounding and bid/ask/mid). Catches the
-    worst failure for a trading agent: confidently quoting a made-up price."""
+    prompt, or memory (allowing for rounding and bid/ask/mid), or be a spread
+    or change computed from those. Catches the worst failure for a trading
+    agent: confidently quoting a made-up price."""
     if not sc.check_grounding:
         return True, "skipped"
     known_blob = " ".join([str(c["result"]) for c in trace["tool_calls"]] + [sc.prompt] + list(sc.world.facts.values()))
     known = _numbers(known_blob)
+    derived = _derived(known)
     invented = []
     for raw in PRICE_RE.findall(trace["text"]):
         x, decimals = float(raw), len(raw.split(".")[1])
         tol = 10 ** -decimals * 1.01
-        if not any(abs(x - k) <= tol for k in known):
-            invented.append(raw)
+        if any(abs(x - k) <= tol for k in known):
+            continue
+        # Derived values only count when they're small relative to a price,
+        # so a fabricated *price* can't sneak through as "some difference".
+        if x < 1.0 and any(abs(x - d) <= tol for d in derived):
+            continue
+        invented.append(raw)
     return (not invented, f"ungrounded numbers {invented}" if invented else "all quoted prices grounded")
 
 

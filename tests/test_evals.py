@@ -34,6 +34,30 @@ def test_grounding_flags_invented_price():
     assert not ok and "1.27650" in detail
 
 
+def test_grounding_accepts_computed_spread():
+    """Regression: first real eval run flagged a correct EUR_USD spread
+    (1.08506 - 1.08492 = 0.00014) as invented."""
+    sc = Scenario(id="x", description="")
+    t = trace("EUR_USD 1.08499, spread 0.00014",
+              [call("get_market_price", result={"bid": 1.08492, "ask": 1.08506, "price": 1.08499})])
+    assert checks.grounded_prices(t, sc)[0]
+
+
+def test_grounding_still_flags_invented_spread():
+    sc = Scenario(id="x", description="")
+    t = trace("spread 0.00090",
+              [call("get_market_price", result={"bid": 1.08492, "ask": 1.08506, "price": 1.08499})])
+    assert not checks.grounded_prices(t, sc)[0]
+
+
+def test_grounding_derived_values_cannot_launder_a_price():
+    """A made-up price must not pass just because it equals some difference."""
+    sc = Scenario(id="x", description="")
+    t = trace("GBP_USD at 1.27650",
+              [call("a", result={"x": 2.36149, "y": 1.08499})])  # 2.36149 - 1.08499 = 1.2765
+    assert not checks.grounded_prices(t, sc)[0]
+
+
 def test_grounding_allows_numbers_from_memory():
     sc = Scenario(id="x", description="", world=World(facts={"prev": "1.08010"}))
     assert checks.grounded_prices(trace("up from 1.0801"), sc)[0]
