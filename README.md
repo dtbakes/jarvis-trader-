@@ -17,6 +17,7 @@ reports to Telegram. It runs **observe-only on a demo account**.
 | Engine B | `core/engine_b.py` | Bollinger + RSI(2) mean reversion, trades only in RANGE |
 | Engine C | `core/engine_c.py` | Daily support/resistance zone rejection (Nick Shawn style): multi-touch zones, sell the failed poke, stop above the zone, 1:1 target, early exit on a close back inside. Sells-only vs both directions |
 | Universe runs | `core/run_universe.py` | Backtests both engines over 10 pairs and logs trials to SQLite |
+| Engine D | `core/engine_d.py` | Momentum + carry portfolio: 7 currencies vs USD, monthly rebalance, volatility-scaled legs, real rate-differential carry from FRED. One pre-registered run |
 | Risk | `core/risk.py`, `core/killswitch.py` | Hard order limits (per-order, per-instrument and total exposure caps, stop required, no entries after Friday noon New York), plus a latched kill switch (daily loss, drawdown, losing streak, broker errors) that only a human can release |
 | Agent | `core/agent.py`, `main.py` | Claude tool-use loop with memory; trading tools are hidden from the model in observe-only mode |
 
@@ -28,17 +29,21 @@ gross), so both were shelved per the kill criteria. A follow-up structure lab
 (sweeps / volume nodes / break-of-structure on H1) also found nothing. These
 null results are logged in the trial database rather than tuned away.
 
-**Engine C is untested on real data yet.** It checks whether the H1 null
-result changes on daily/weekly zones with several touches. Run it from
-`core/` (needs OANDA practice credentials for the daily candles):
+Engine A was also run once on daily bars (10y, 10 pairs): PF 0.54. Dead.
+
+**Engine C** (daily zone rejection, run 2026-10-26, 15 pairs, 10y): sells-only
+PF 0.89, both directions PF 1.05 with zero expectancy over 2,240 trades. No
+edge; archived. Re-run with `cd core && python engine_c.py --universe all`.
+
+**Engine D (momentum + carry)** is the last pre-registered test. It needs
+OANDA practice credentials for daily candles and downloads rates from FRED:
 
 ```bash
-cd core && python engine_c.py --universe all --years 10
+cd core && python engine_d.py
 ```
 
-It prints sells-only and both-directions side by side, per pair and pooled,
-and logs every run to the trials table. The same kill rule applies: pooled
-PF under 1.05 after costs means it's shelved.
+Its rules are fixed in the module docstring. The verdict is the combined
+rule's monthly profit factor after costs, against the same 1.05 line.
 
 ## Testing
 
