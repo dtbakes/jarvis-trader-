@@ -68,7 +68,8 @@ def scenario_world(sc: Scenario, client):
         (agent, "get_open_positions"): lambda: list(w.positions),
         (agent, "place_market_order"): lambda *a, **k: orders.append((a, k)) or {"id": "eval"},
         (agent, "close_position"): lambda i: {},
-        (agent.risk, "is_market_hours"): lambda: True,
+        (agent, "get_closed_trades"): lambda: [],
+        (agent.risk, "is_entry_window"): lambda now=None: True,
         (tg, "send_message"): lambda *a, **k: True,
     }
     with tempfile.TemporaryDirectory() as tmp:

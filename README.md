@@ -15,8 +15,9 @@ reports to Telegram. It runs **observe-only on a demo account**.
 | Regime | `core/regime.py` | Labels each H4 bar TREND / RANGE / NEUTRAL / NO_TRADE (ADX, vol percentile, session + news blackouts, hysteresis) |
 | Engine A | `core/engine_a.py` | Donchian breakout + chandelier trail, trades only in TREND |
 | Engine B | `core/engine_b.py` | Bollinger + RSI(2) mean reversion, trades only in RANGE |
+| Engine C | `core/engine_c.py` | Daily support/resistance zone rejection (Nick Shawn style): multi-touch zones, sell the failed poke, stop above the zone, 1:1 target, early exit on a close back inside. Sells-only vs both directions |
 | Universe runs | `core/run_universe.py` | Backtests both engines over 10 pairs and logs trials to SQLite |
-| Risk | `core/risk.py`, `core/killswitch.py` | Hard order limits, plus a latched kill switch (daily loss, drawdown, broker errors) that only a human can release |
+| Risk | `core/risk.py`, `core/killswitch.py` | Hard order limits (per-order, per-instrument and total exposure caps, stop required, no entries after Friday noon New York), plus a latched kill switch (daily loss, drawdown, losing streak, broker errors) that only a human can release |
 | Agent | `core/agent.py`, `main.py` | Claude tool-use loop with memory; trading tools are hidden from the model in observe-only mode |
 
 ## Results so far
@@ -26,6 +27,18 @@ slippage and swap modeled. **Neither showed an edge** (profit factor ≈ 1.0
 gross), so both were shelved per the kill criteria. A follow-up structure lab
 (sweeps / volume nodes / break-of-structure on H1) also found nothing. These
 null results are logged in the trial database rather than tuned away.
+
+**Engine C is untested on real data yet.** It checks whether the H1 null
+result changes on daily/weekly zones with several touches. Run it from
+`core/` (needs OANDA practice credentials for the daily candles):
+
+```bash
+cd core && python engine_c.py --universe all --years 10
+```
+
+It prints sells-only and both-directions side by side, per pair and pooled,
+and logs every run to the trials table. The same kill rule applies: pooled
+PF under 1.05 after costs means it's shelved.
 
 ## Testing
 

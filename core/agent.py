@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from core.memory import log_event, get_recent_events, log_trade, get_recent_trades, get_all_facts, set_fact
-from brokers.oanda import get_price, get_candles, place_market_order, close_position, get_open_positions, get_account_summary
+from brokers.oanda import get_price, get_candles, place_market_order, close_position, get_open_positions, get_account_summary, get_closed_trades
 import core.risk as risk
 from core import killswitch
 
@@ -85,27 +85,36 @@ def remember_fact(key, value):
     return {"stored": True, "key": key, "value": value}
 
 def place_trade(instrument, units, reasoning, stop_loss_price=None):
-    # Fresh NAV check right before the order, so the kill switch sees the
-    # latest P&L. If the account can't be read, evaluate() fails closed.
-    try:
-        nav = float(get_account_summary()["NAV"])
-    except Exception as e:
-        log_event("killswitch_nav_error", f"Could not read NAV: {e}")
-        nav = None
-    ks = killswitch.evaluate(nav)
+    # Fresh kill switch checks right before the order (NAV, drawdown, losing
+    # streak). Any broker read failure fails closed.
+    ks = killswitch.refresh(get_account_summary, get_closed_trades)
+    for err in ks["errors"]:
+        log_event("killswitch_read_error", err)
     if ks["tripped_now"]:
         log_event("killswitch_tripped", ks["reason"])
 
+    # Current net exposure per instrument, for the stacking caps.
+    try:
+        open_units = {
+            p["instrument"]: int(float(p["long"]["units"]) + float(p["short"]["units"]))
+            for p in get_open_positions()
+        }
+    except Exception as e:
+        log_event("trade_blocked", f"BLOCKED {instrument}: can't read open positions: {e}")
+        return {"executed": False, "blocked": True,
+                "reason": f"Could not read open positions: {e}"}
+
     # RISK CHECK FIRST -- this is the gate. Nothing bypasses it.
     try:
-        risk.check_order(instrument, units, stop_loss_price)
+        risk.check_order(instrument, units, stop_loss_price, open_units=open_units)
     except risk.RiskViolation as e:
         log_event("trade_blocked", f"BLOCKED {instrument} {units}: {e}")
         return {"executed": False, "blocked": True, "reason": str(e)}
 
-    if not risk.is_market_hours():
-        log_event("trade_blocked", f"BLOCKED {instrument}: market closed")
-        return {"executed": False, "blocked": True, "reason": "Market is closed."}
+    if not risk.is_entry_window():
+        log_event("trade_blocked", f"BLOCKED {instrument}: outside entry window")
+        return {"executed": False, "blocked": True,
+                "reason": "Outside the entry window (market closed or past the Friday cutoff)."}
 
     # Passed all checks -- execute
     try:
