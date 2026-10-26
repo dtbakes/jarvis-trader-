@@ -120,3 +120,51 @@ def test_check_order_blocks_when_engaged():
 def test_check_order_requires_stop():
     with pytest.raises(risk.RiskViolation, match="stop_loss_price"):
         risk.check_order("EUR_USD", 100)
+
+
+# --- losing streak ---
+
+def _trade(day, pl):
+    # OANDA-style timestamp with nanoseconds
+    return {"close_time": f"2026-10-{day:02d}T14:00:00.123456789Z", "pl": pl}
+
+
+def test_losing_streak_counts_newest_first():
+    trades = [_trade(1, -5), _trade(2, 10), _trade(3, -5), _trade(4, -5)]
+    assert killswitch.losing_streak(trades) == 2
+    assert killswitch.losing_streak(list(reversed(trades))) == 2
+
+
+def test_losing_streak_trips_at_limit():
+    losers = [_trade(d, -5) for d in range(1, risk.MAX_CONSECUTIVE_LOSSES)]
+    assert not killswitch.evaluate_trades(losers, now=T0)["engaged"]
+    losers.append(_trade(20, -1))
+    ks = killswitch.evaluate_trades(losers, now=T0)
+    assert ks["engaged"] and ks["tripped_now"] and "losing trades" in ks["reason"]
+
+
+def test_release_starts_a_fresh_streak(monkeypatch):
+    losers = [_trade(d, -5) for d in range(1, risk.MAX_CONSECUTIVE_LOSSES + 1)]
+    assert killswitch.evaluate_trades(losers, now=T0)["engaged"]
+    monkeypatch.setattr(killswitch, "_now", lambda: datetime(2026, 10, 25, tzinfo=timezone.utc))
+    killswitch.release()
+    assert not killswitch.evaluate_trades(losers, now=T0)["engaged"]
+    assert killswitch.evaluate_trades(losers + [_trade(26, -5)], now=T0)["losing_streak"] == 1
+
+
+def test_unreadable_trade_history_fails_closed():
+    ks = killswitch.evaluate_trades(None, now=T0)
+    assert ks["engaged"] and ks["tripped_now"]
+
+
+def test_refresh_runs_all_checks_and_reports_read_errors():
+    def no_trades():
+        raise ConnectionError("down")
+    ks = killswitch.refresh(lambda: {"NAV": "1000"}, no_trades, now=T0)
+    assert ks["engaged"] and ks["tripped_now"]
+    assert ks["errors"] and "closed trades" in ks["errors"][0]
+
+
+def test_refresh_ok_when_everything_is_fine():
+    ks = killswitch.refresh(lambda: {"NAV": "1000"}, lambda: [_trade(1, 5)], now=T0)
+    assert not ks["engaged"] and ks["errors"] == []

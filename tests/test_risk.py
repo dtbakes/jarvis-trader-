@@ -71,3 +71,42 @@ def test_is_market_hours(monkeypatch, utc, open_):
     _FrozenClock.frozen = datetime.fromisoformat(utc).replace(tzinfo=timezone.utc)
     monkeypatch.setattr(risk, "datetime", _FrozenClock)
     assert risk.is_market_hours() is open_
+
+
+# ---- exposure caps (stacked orders) ---------------------------------------- #
+
+def test_stacking_past_instrument_cap_rejected():
+    open_units = {"EUR_USD": risk.MAX_INSTRUMENT_UNITS - 100}
+    assert risk.check_order("EUR_USD", 100, stop_loss_price=1.05, open_units=open_units)
+    with pytest.raises(risk.RiskViolation, match="per instrument"):
+        risk.check_order("EUR_USD", 101, stop_loss_price=1.05, open_units=open_units)
+
+
+def test_reducing_an_oversized_position_is_allowed():
+    open_units = {"EUR_USD": -risk.MAX_INSTRUMENT_UNITS}
+    assert risk.check_order("EUR_USD", 500, stop_loss_price=1.05, open_units=open_units)
+
+
+def test_total_exposure_cap_counts_other_instruments():
+    open_units = {"GBP_USD": 1500, "USD_JPY": -1400}
+    assert risk.check_order("EUR_USD", 100, stop_loss_price=1.05, open_units=open_units)
+    with pytest.raises(risk.RiskViolation, match="Total exposure"):
+        risk.check_order("EUR_USD", 101, stop_loss_price=1.05, open_units=open_units)
+
+
+# ---- Friday entry cutoff ---------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    "utc,ok",
+    [
+        ("2026-10-09 15:59", True),   # Friday 11:59 New York (EDT)
+        ("2026-10-09 16:00", False),  # Friday 12:00 New York
+        ("2026-12-11 16:59", True),   # Friday 11:59 New York (EST)
+        ("2026-12-11 17:00", False),  # Friday 12:00 New York (EST)
+        ("2026-10-08 20:00", True),   # Thursday
+        ("2026-10-10 12:00", False),  # Saturday, market closed
+    ],
+)
+def test_entry_window(utc, ok):
+    now = datetime.fromisoformat(utc).replace(tzinfo=timezone.utc)
+    assert risk.is_entry_window(now) is ok

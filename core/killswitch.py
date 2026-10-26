@@ -8,7 +8,8 @@ Trips automatically when:
     * today's loss (NAV vs NAV at the 17:00 New York rollover) >= MAX_DAILY_LOSS
     * drawdown from peak NAV >= MAX_DRAWDOWN_PCT
     * MAX_CONSECUTIVE_ERRORS broker errors in a row
-    * the account can't be read (fail closed: no NAV, no trading)
+    * MAX_CONSECUTIVE_LOSSES losing trades in a row (counted since the last release)
+    * the account or closed-trade history can't be read (fail closed)
     * the state file exists but can't be read (fail closed)
 
 Trips manually when:
@@ -63,6 +64,7 @@ def _default_state() -> dict:
         "day_start_nav": None,
         "peak_nav": None,
         "consecutive_errors": 0,
+        "streak_since": None,
     }
 
 
@@ -128,7 +130,8 @@ def release(path: str | None = None) -> dict:
     """
     state = load_state(path)
     state.update(engaged=False, reason=None, source=None, engaged_at=None,
-                 day=None, day_start_nav=None, peak_nav=None, consecutive_errors=0)
+                 day=None, day_start_nav=None, peak_nav=None, consecutive_errors=0,
+                 streak_since=_now().isoformat())
     save_state(state, path)
     return state
 
@@ -196,6 +199,90 @@ def record_success(path: str | None = None) -> None:
     if state["consecutive_errors"]:
         state["consecutive_errors"] = 0
         save_state(state, path)
+
+
+def _parse_ts(ts: str) -> datetime:
+    """OANDA times carry nanoseconds ("...:30.123456789Z"); trim to micros."""
+    ts = ts.replace("Z", "+00:00")
+    if "." in ts:
+        head, rest = ts.split(".", 1)
+        frac = rest[:len(rest) - len(rest.lstrip("0123456789"))]
+        tz = rest[len(frac):]
+        ts = f"{head}.{frac[:6]}{tz}"
+    return datetime.fromisoformat(ts)
+
+
+def losing_streak(closed_trades: list[dict], since: str | None = None) -> int:
+    """
+    Count losing trades in a row, newest first. Each trade is
+    {"close_time": iso str, "pl": float}. Trades closed before `since`
+    (the last release) don't count, so a release gives a clean slate.
+    A trade that isn't a loss ends the streak.
+    """
+    cutoff = _parse_ts(since) if since else None
+    trades = sorted(closed_trades, key=lambda t: _parse_ts(t["close_time"]), reverse=True)
+    streak = 0
+    for t in trades:
+        if cutoff and _parse_ts(t["close_time"]) <= cutoff:
+            break
+        if float(t["pl"]) < 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def evaluate_trades(closed_trades: list[dict] | None, now: datetime | None = None,
+                    path: str | None = None) -> dict:
+    """
+    Feed recently closed trades. Trips after MAX_CONSECUTIVE_LOSSES losers in
+    a row. None means the trade history couldn't be read: fail closed.
+    """
+    now = now or _now()
+    state = load_state(path)
+    was_engaged = state["engaged"]
+
+    if closed_trades is None:
+        reason = "Closed-trade history unavailable; failing closed."
+        streak = None
+    else:
+        streak = losing_streak(closed_trades, state["streak_since"])
+        reason = (f"{streak} losing trades in a row "
+                  f"(limit {risk.MAX_CONSECUTIVE_LOSSES}).") \
+            if streak >= risk.MAX_CONSECUTIVE_LOSSES else None
+
+    if reason and not was_engaged:
+        state.update(engaged=True, reason=reason, source="auto", engaged_at=now.isoformat())
+        save_state(state, path)
+    return {**state, "tripped_now": state["engaged"] and not was_engaged,
+            "losing_streak": streak}
+
+
+def refresh(get_account_summary, get_closed_trades, now: datetime | None = None,
+            path: str | None = None) -> dict:
+    """
+    Read the account and recent closed trades from the broker and run every
+    automatic check. Any read failure fails closed. Returns the final state
+    with tripped_now True if this call tripped the switch, plus "errors".
+    """
+    errors = []
+    try:
+        nav = float(get_account_summary()["NAV"])
+    except Exception as e:
+        errors.append(f"NAV: {e}")
+        nav = None
+    try:
+        closed = get_closed_trades()
+    except Exception as e:
+        errors.append(f"closed trades: {e}")
+        closed = None
+
+    was_engaged = load_state(path)["engaged"]
+    nav_result = evaluate(nav, now=now, path=path)
+    trade_result = evaluate_trades(closed, now=now, path=path)
+    return {**nav_result, **trade_result,
+            "tripped_now": trade_result["engaged"] and not was_engaged,
+            "errors": errors}
 
 
 def flatten_all(get_positions, close_position) -> list[dict]:

@@ -9,6 +9,7 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.positions as positions
 import oandapyV20.endpoints.accounts as accounts
+import oandapyV20.endpoints.trades as trades
 # practice or live, based on config
 client = oandapyV20.API(
     access_token=config.OANDA_API_KEY,
@@ -106,6 +107,18 @@ def close_position(instrument):
     )
     client.request(r)
     return r.response
+
+def get_closed_trades(count=20):
+    """Most recently closed trades as [{"id", "instrument", "close_time", "pl"}]."""
+    r = trades.TradesList(accountID=config.OANDA_ACCOUNT_ID,
+                          params={"state": "CLOSED", "count": count})
+    client.request(r)
+    return [
+        {"id": t["id"], "instrument": t["instrument"],
+         "close_time": t["closeTime"], "pl": float(t["realizedPL"])}
+        for t in r.response.get("trades", [])
+        if t.get("closeTime")
+    ]
 
 def get_account_summary():
     """Return balance, unrealized P&L, margin, etc."""

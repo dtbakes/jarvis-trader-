@@ -14,7 +14,7 @@ from fakes import ScriptedClient, response, text, tool_use
 
 @pytest.fixture(autouse=True)
 def offline(tmp_path, monkeypatch):
-    """Isolated memory DB, fake broker, no Telegram, market open."""
+    """Isolated memory DB, fake broker, no Telegram, entry window open."""
     monkeypatch.setattr(memory, "DB_PATH", str(tmp_path / "memory.db"))
     memory.init_db()
 
@@ -26,7 +26,8 @@ def offline(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "close_position", lambda i: calls["closes"].append(i) or {})
     import notifications.telegram as tg
     monkeypatch.setattr(tg, "send_message", lambda msg, **k: calls["telegram"].append(msg) or True)
-    monkeypatch.setattr(agent.risk, "is_market_hours", lambda: True)
+    monkeypatch.setattr(agent, "get_closed_trades", lambda: [])
+    monkeypatch.setattr(agent.risk, "is_entry_window", lambda now=None: True)
     return calls
 
 
@@ -190,3 +191,38 @@ def test_memory_context_reaches_system_prompt(monkeypatch):
     client = use(monkeypatch, response(text("ok")))
     agent.run_agent("check", notify=False)
     assert "risk_tolerance: low" in client.requests[0]["system"]
+
+
+# ---- stacking, losing streak, Friday cutoff --------------------------------- #
+
+def _order(units=100):
+    return response(tool_use("place_trade", {"instrument": "EUR_USD", "units": units,
+                                             "stop_loss_price": 1.08, "reasoning": "test"}))
+
+
+def test_stacked_orders_hit_the_instrument_cap(monkeypatch, offline):
+    held = agent.risk.MAX_INSTRUMENT_UNITS - 500
+    monkeypatch.setattr(agent, "get_open_positions", lambda: [
+        {"instrument": "EUR_USD", "long": {"units": str(held)}, "short": {"units": "0"}}])
+    use(monkeypatch, _order(agent.risk.MAX_POSITION_UNITS), response(text("blocked")))
+    trace = agent.run_agent("trade", allow_trading=True, notify=False)
+    assert offline["orders"] == []
+    assert "per instrument" in trace["tool_calls"][0]["result"]["reason"]
+
+
+def test_losing_streak_blocks_orders(monkeypatch, offline):
+    losers = [{"close_time": f"2026-10-{d:02d}T10:00:00Z", "pl": -3.0}
+              for d in range(1, agent.risk.MAX_CONSECUTIVE_LOSSES + 1)]
+    monkeypatch.setattr(agent, "get_closed_trades", lambda: losers)
+    use(monkeypatch, _order(), response(text("blocked")))
+    trace = agent.run_agent("trade", allow_trading=True, notify=False)
+    assert offline["orders"] == []
+    assert "losing trades" in trace["tool_calls"][0]["result"]["reason"]
+
+
+def test_entry_window_closed_blocks_orders(monkeypatch, offline):
+    monkeypatch.setattr(agent.risk, "is_entry_window", lambda now=None: False)
+    use(monkeypatch, _order(), response(text("blocked")))
+    trace = agent.run_agent("trade", allow_trading=True, notify=False)
+    assert offline["orders"] == []
+    assert "entry window" in trace["tool_calls"][0]["result"]["reason"]

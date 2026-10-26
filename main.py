@@ -10,7 +10,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from core.agent import run_agent
 from core.memory import log_event
 from notifications.telegram import send_message
-from brokers.oanda import get_account_summary, get_open_positions, close_position
+from brokers.oanda import get_account_summary, get_closed_trades, get_open_positions, close_position
 from core import killswitch
 import core.risk as risk
 
@@ -18,14 +18,10 @@ CHECK_INTERVAL_MINUTES = 30
 FLATTEN_ON_TRIP = True   # close all open positions when the kill switch trips automatically
 
 def check_killswitch():
-    """Feed the latest NAV to the kill switch; flatten and alert if it just tripped."""
-    try:
-        nav = float(get_account_summary()["NAV"])
-    except Exception as e:
-        log_event("killswitch_nav_error", f"Could not read NAV: {e}")
-        nav = None
-
-    ks = killswitch.evaluate(nav)
+    """Run every kill switch check; flatten and alert if it just tripped."""
+    ks = killswitch.refresh(get_account_summary, get_closed_trades)
+    for err in ks["errors"]:
+        log_event("killswitch_read_error", err)
     if not ks["tripped_now"]:
         return ks
 
