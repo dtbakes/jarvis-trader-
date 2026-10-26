@@ -28,8 +28,8 @@ Verdict  : monthly profit factor (sum of up months / sum of down months)
            of the COMBINED rule. Under 1.05 -> archived, like A, B and C.
            Momentum-only and carry-only are printed as diagnostics only.
 
-Rates come from FRED (OECD "immediate rates", monthly, percent), cached in
-data/rates/. A series that stopped updating more than 6 months before the
+Rates come from FRED (OECD "immediate rates", monthly, percent, with backup
+series spliced in where an OECD series stopped), cached in data/rates/. A series that stopped updating more than 6 months before the
 end of the price data stops the run, so stale rates can't fake a result.
 
 Usage (from core/):
@@ -55,11 +55,25 @@ LEGS = {
     "CAD": ("USD_CAD", -1),
 }
 
+# Per currency, FRED series in priority order. The first is the OECD
+# immediate (overnight) rate. Some of those stopped updating, so later months
+# are filled from the next series that has them: the ECB's deposit rate and
+# EUR short-term rate, and OECD 3-month interbank or central bank rates. Only
+# the SIGN of (currency rate - USD rate) drives the signal, so small level
+# differences between these definitions don't change positions.
 FRED_SERIES = {
-    "USD": "IRSTCI01USM156N", "EUR": "IRSTCI01EZM156N", "GBP": "IRSTCI01GBM156N",
-    "JPY": "IRSTCI01JPM156N", "CHF": "IRSTCI01CHM156N", "CAD": "IRSTCI01CAM156N",
-    "AUD": "IRSTCI01AUM156N", "NZD": "IRSTCI01NZM156N",
+    "USD": ["IRSTCI01USM156N", "FEDFUNDS"],
+    "EUR": ["IRSTCI01EZM156N", "ECBDFR", "ECBESTRVOLWGTTRMDMNRT"],
+    "GBP": ["IRSTCI01GBM156N", "IR3TIB01GBM156N"],
+    "JPY": ["IRSTCI01JPM156N", "IR3TIB01JPM156N"],
+    "CHF": ["IRSTCI01CHM156N", "IR3TIB01CHM156N", "IRSTCB01CHM156N"],
+    "CAD": ["IRSTCI01CAM156N", "IR3TIB01CAM156N"],
+    "AUD": ["IRSTCI01AUM156N", "IR3TIB01AUM156N"],
+    "NZD": ["IRSTCI01NZM156N", "IR3TIB01NZM156N", "IRSTCB01NZM156N"],
 }
+# Last resort for months no FRED series covers: data/rates/manual.csv with
+# columns month,currency,rate (e.g. "2025-06,CHF,0.0"), in percent.
+MANUAL_RATES_FILE = "manual.csv"
 MAX_RATE_STALENESS_DAYS = 183
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -82,21 +96,61 @@ class EngineDConfig:
 # Data
 # --------------------------------------------------------------------------- #
 
-def fetch_rates(refresh: bool = False) -> pd.DataFrame:
-    """Monthly short rates in percent, columns = currencies, index = month start."""
-    cache = os.path.join(_DATA_DIR, "rates")
-    os.makedirs(cache, exist_ok=True)
-    cols = {}
-    for ccy, series in FRED_SERIES.items():
-        path = os.path.join(cache, f"{series}.csv")
+def _read_fred(series: str, cache: str, refresh: bool) -> pd.Series | None:
+    """One FRED series as a monthly (month-start) mean. None if unavailable."""
+    path = os.path.join(cache, f"{series}.csv")
+    try:
         if refresh or not os.path.exists(path):
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
             pd.read_csv(url).to_csv(path, index=False)
         raw = pd.read_csv(path)
-        # FRED has used both "DATE" and "observation_date" as the first column.
-        s = pd.Series(pd.to_numeric(raw.iloc[:, 1], errors="coerce").to_numpy(),
-                      index=pd.to_datetime(raw.iloc[:, 0]))
-        cols[ccy] = s.dropna()
+    except Exception as e:
+        print(f"  [rates] {series} unavailable ({type(e).__name__}); skipping")
+        return None
+    # FRED has used both "DATE" and "observation_date" as the first column,
+    # and "." for missing daily values.
+    s = pd.Series(pd.to_numeric(raw.iloc[:, 1], errors="coerce").to_numpy(),
+                  index=pd.to_datetime(raw.iloc[:, 0])).dropna()
+    return monthly_mean(s) if len(s) else None
+
+
+def monthly_mean(s: pd.Series) -> pd.Series:
+    """Daily or monthly series -> month-start index, monthly mean."""
+    return s.groupby(s.index.to_period("M")).mean().to_timestamp(how="start")
+
+
+def splice(series: list[pd.Series | None]) -> pd.Series:
+    """Earlier series win where they have data; later ones fill the rest."""
+    out = pd.Series(dtype=float)
+    for s in series:
+        if s is not None:
+            out = s if out.empty else out.combine_first(s)
+    return out.sort_index()
+
+
+def read_manual_rates(path: str) -> pd.DataFrame:
+    """Optional hand-entered months: columns month,currency,rate."""
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    m = pd.read_csv(path)
+    m["month"] = pd.to_datetime(m["month"]).dt.to_period("M").dt.to_timestamp(how="start")
+    return m.pivot_table(index="month", columns="currency", values="rate", aggfunc="last")
+
+
+def fetch_rates(refresh: bool = False, verbose: bool = True) -> pd.DataFrame:
+    """Monthly short rates in percent, columns = currencies, index = month start."""
+    cache = os.path.join(_DATA_DIR, "rates")
+    os.makedirs(cache, exist_ok=True)
+    manual = read_manual_rates(os.path.join(cache, MANUAL_RATES_FILE))
+    cols = {}
+    for ccy, ids in FRED_SERIES.items():
+        parts = [_read_fred(sid, cache, refresh) for sid in ids]
+        if ccy in manual.columns:
+            parts.append(manual[ccy].dropna())
+        cols[ccy] = splice(parts)
+        if verbose:
+            used = [f"{sid} to {p.index[-1]:%Y-%m}" for sid, p in zip(ids, parts) if p is not None]
+            print(f"  [rates] {ccy}: " + ", ".join(used or ["nothing"]))
     return pd.DataFrame(cols).sort_index()
 
 
@@ -108,8 +162,10 @@ def check_rates_fresh(rates: pd.DataFrame, price_end: pd.Timestamp) -> None:
     if stale:
         detail = ", ".join(f"{c} ends {d:%Y-%m}" for c, d in stale.items())
         raise ValueError(
-            f"Rate data is stale ({detail}). Swap in a current FRED series for "
-            f"those currencies in FRED_SERIES before trusting a result."
+            f"Rate data is stale ({detail}). Add a current FRED series for those "
+            f"currencies to FRED_SERIES, or fill the missing months in "
+            f"data/rates/{MANUAL_RATES_FILE} (month,currency,rate), before "
+            f"trusting a result."
         )
 
 

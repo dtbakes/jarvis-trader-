@@ -121,3 +121,41 @@ def test_month_end_days():
     idx = pd.bdate_range("2024-01-01", "2024-03-31", tz="UTC")
     got = D.month_end_days(idx)
     assert [d.day for d in got] == [31, 29, 29]
+
+
+# ---- rate data splicing ------------------------------------------------------- #
+
+def _monthly(start, months, value):
+    return pd.Series(float(value), index=pd.date_range(start, periods=months, freq="MS"))
+
+
+def test_splice_prefers_primary_and_fills_later_months():
+    primary = _monthly("2016-01-01", 24, 1.0)             # stops end of 2017
+    backup = _monthly("2016-06-01", 60, 2.0)              # runs to 2021
+    out = D.splice([primary, None, backup])
+    assert out.loc["2016-06-01"] == 1.0                   # primary wins on overlap
+    assert out.loc["2020-01-01"] == 2.0                   # backup fills the gap
+    assert out.index[-1] == backup.index[-1]
+
+
+def test_monthly_mean_from_daily():
+    idx = pd.to_datetime(["2024-01-02", "2024-01-31", "2024-02-15"])
+    out = D.monthly_mean(pd.Series([1.0, 3.0, 5.0], index=idx))
+    assert list(out.index) == list(pd.to_datetime(["2024-01-01", "2024-02-01"]))
+    assert list(out) == [2.0, 5.0]
+
+
+def test_fetch_rates_splices_backups_and_manual(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(D, "FRED_SERIES", {"USD": ["U1"], "CHF": ["C1", "C2"]})
+    fake = {"U1": _monthly("2016-01-01", 130, 2.0),
+            "C1": _monthly("2016-01-01", 98, -0.75),       # stops early 2024
+            "C2": None}                                   # series not found
+    monkeypatch.setattr(D, "_read_fred", lambda sid, cache, refresh: fake[sid])
+    (tmp_path / "rates").mkdir()
+    (tmp_path / "rates" / "manual.csv").write_text(
+        "month,currency,rate\n2024-03,CHF,1.5\n2026-09,CHF,0.0\n")
+    rates = D.fetch_rates(verbose=False)
+    assert rates.loc["2020-01-01", "CHF"] == -0.75
+    assert rates.loc["2024-03-01", "CHF"] == 1.5
+    assert rates["CHF"].last_valid_index() == pd.Timestamp("2026-09-01")
