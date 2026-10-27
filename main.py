@@ -13,6 +13,7 @@ from notifications.telegram import send_message
 from brokers.oanda import get_account_summary, get_closed_trades, get_open_positions, close_position
 from core import killswitch
 import core.risk as risk
+from core import signal_report
 
 CHECK_INTERVAL_MINUTES = 30
 FLATTEN_ON_TRIP = True   # close all open positions when the kill switch trips automatically
@@ -61,6 +62,16 @@ def market_check():
         log_event("scheduler_error", f"Cycle failed: {e}")
         send_message(f"⚠️ *JARVIS error during scheduled run:*\n`{e}`")
 
+def monthly_signal_check():
+    """Engine D paper tracking: send the month-end positions once. Never trades."""
+    try:
+        text = signal_report.run_monthly(lambda t: send_message(t, markdown=False))
+        if text:
+            log_event("engine_d_report", "Sent Engine D month-end positions")
+    except Exception as e:
+        log_event("engine_d_report_error", f"Signal report failed: {e}")
+        send_message(f"⚠️ Engine D signal report failed: {e}", markdown=False)
+
 if __name__ == "__main__":
     print(f"JARVIS starting. Checking markets every {CHECK_INTERVAL_MINUTES} min during market hours.")
     send_message(f"🤖 *JARVIS autopilot started.* Observing markets every {CHECK_INTERVAL_MINUTES} min. Observe-only mode — no trades.")
@@ -70,6 +81,10 @@ if __name__ == "__main__":
 
     scheduler = BlockingScheduler()
     scheduler.add_job(market_check, "interval", minutes=CHECK_INTERVAL_MINUTES)
+    # After the 17:00 New York close (21:00-22:00 UTC) on weekdays. A month is
+    # reported once, as soon as its last daily bar has closed.
+    scheduler.add_job(monthly_signal_check, "cron", day_of_week="mon-fri",
+                      hour=23, minute=15, timezone="UTC")
 
     # Run one check immediately on startup
     market_check()

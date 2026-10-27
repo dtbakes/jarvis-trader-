@@ -45,6 +45,14 @@ cd core && python engine_d.py
 Its rules are fixed in the module docstring. The verdict is the combined
 rule's monthly profit factor after costs, against the same 1.05 line.
 
+Result (2026-10-26, 8.9y): combined PF 1.14, so it passes, but thinly: +1.3% a
+year at 12.4% volatility (Sharpe 0.16), max drawdown 25%. It is being
+**paper-tracked only**: `main.py` runs `core/signal_report.py` each weekday
+evening, and after each month-end it sends the new positions and the
+reasons to Telegram, logs them to `engine_d_signals`, and reports
+out-of-sample performance since the October 2026 positions. No orders are
+placed. Preview any time with `python -m core.signal_report`.
+
 ## Testing
 
 ```bash
